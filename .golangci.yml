@@ -1,0 +1,26 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: all
+  disable:
+    - depguard
+    - exhaustruct
+    - mnd
+    - testpackage
+    - wsl
+
+linters-settings:
+  funlen:
+    lines: 100
+    statements: 50
+
+  lll:
+    line-length: 140
+
+  nolintlint:
+    require-explanation: true
+    require-specific: true

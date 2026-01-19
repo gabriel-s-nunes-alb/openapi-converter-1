@@ -1,0 +1,5 @@
+with-expecter: true
+packages:
+  github.com/GabrielNunesIT/openapi-converter/internal/domain:
+    interfaces:
+      Converter:

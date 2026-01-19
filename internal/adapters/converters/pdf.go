@@ -1,0 +1,746 @@
+package converters
+
+import (
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+
+	"github.com/GabrielNunesIT/openapi-converter/internal/domain"
+	"github.com/jung-kurt/gofpdf"
+)
+
+const (
+	pdfFormat      = "pdf"
+	pdfPageWidth   = 190.0
+	pdfMarginLeft  = 10.0
+	pdfMarginTop   = 10.0
+	pdfMarginRight = 10.0
+	pdfLineHeight  = 5.0
+)
+
+// PDFConverter converts OpenAPI documents to PDF format.
+type PDFConverter struct {
+	pdf            *gofpdf.Fpdf
+	tocItems       []tocItem
+	linkID         int
+	componentLinks map[string]int // Map component name to link ID
+}
+
+type tocItem struct {
+	title  string
+	level  int
+	linkID int
+	page   int
+}
+
+// NewPDFConverter creates a new PDF converter.
+func NewPDFConverter() *PDFConverter {
+	return &PDFConverter{}
+}
+
+// Format returns the output format name.
+func (c *PDFConverter) Format() string {
+	return pdfFormat
+}
+
+// Convert transforms an OpenAPI document to PDF format.
+func (c *PDFConverter) Convert(doc *domain.OpenAPIDocument, output io.Writer) error {
+	c.pdf = gofpdf.New("P", "mm", "A4", "")
+	c.pdf.SetMargins(pdfMarginLeft, pdfMarginTop, pdfMarginRight)
+	c.pdf.SetDrawColor(180, 180, 180) // Light gray for all borders
+	c.tocItems = nil
+	c.linkID = 0
+	c.componentLinks = make(map[string]int)
+
+	// First pass: collect TOC items with placeholder pages
+	c.collectTOC(doc)
+
+	// Title page
+	c.addTitlePage(doc)
+
+	// Table of contents
+	c.addTableOfContents()
+
+	// Content pages
+	c.addContent(doc)
+
+	return c.pdf.Output(output)
+}
+
+func (c *PDFConverter) collectTOC(doc *domain.OpenAPIDocument) {
+	// Add main sections to TOC
+	c.tocItems = append(c.tocItems, tocItem{title: "Overview", level: 1, linkID: c.pdf.AddLink()})
+
+	if len(doc.Servers) > 0 {
+		c.tocItems = append(c.tocItems, tocItem{title: "Servers", level: 1, linkID: c.pdf.AddLink()})
+	}
+
+	// Group paths by tags
+	tagPaths := c.groupPathsByTag(doc)
+	tags := make([]string, 0, len(tagPaths))
+	for tag := range tagPaths {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+
+	// Add Endpoints section
+	c.tocItems = append(c.tocItems, tocItem{title: "API Endpoints", level: 1, linkID: c.pdf.AddLink()})
+
+	for _, tag := range tags {
+		c.tocItems = append(c.tocItems, tocItem{title: tag, level: 2, linkID: c.pdf.AddLink()})
+
+		for _, ep := range tagPaths[tag] {
+			title := fmt.Sprintf("%s %s", ep.method, ep.path)
+			c.tocItems = append(c.tocItems, tocItem{title: title, level: 3, linkID: c.pdf.AddLink()})
+		}
+	}
+
+	// Add Components section
+	if len(doc.Components) > 0 {
+		c.tocItems = append(c.tocItems, tocItem{title: "Components", level: 1, linkID: c.pdf.AddLink()})
+
+		// Create links for each component
+		componentNames := make([]string, 0, len(doc.Components))
+		for name := range doc.Components {
+			componentNames = append(componentNames, name)
+		}
+		sort.Strings(componentNames)
+
+		for _, name := range componentNames {
+			linkID := c.pdf.AddLink()
+			c.componentLinks[name] = linkID
+			c.tocItems = append(c.tocItems, tocItem{title: name, level: 2, linkID: linkID})
+		}
+	}
+}
+
+type endpointRef struct {
+	path      string
+	method    string
+	operation domain.Operation
+}
+
+func (c *PDFConverter) groupPathsByTag(doc *domain.OpenAPIDocument) map[string][]endpointRef {
+	result := make(map[string][]endpointRef)
+
+	for _, path := range doc.Paths {
+		for _, op := range path.Operations {
+			tags := op.Tags
+			if len(tags) == 0 {
+				tags = []string{"Default"}
+			}
+
+			for _, tag := range tags {
+				result[tag] = append(result[tag], endpointRef{
+					path:      path.Path,
+					method:    op.Method,
+					operation: op,
+				})
+			}
+		}
+	}
+
+	// Sort endpoints within each tag by path then method
+	for tag := range result {
+		sort.Slice(result[tag], func(i, j int) bool {
+			if result[tag][i].path == result[tag][j].path {
+				return result[tag][i].method < result[tag][j].method
+			}
+			return result[tag][i].path < result[tag][j].path
+		})
+	}
+
+	return result
+}
+
+func (c *PDFConverter) addTitlePage(doc *domain.OpenAPIDocument) {
+	c.pdf.AddPage()
+
+	// Title
+	c.pdf.SetFont("Arial", "B", 28)
+	c.pdf.Ln(40)
+	c.pdf.CellFormat(pdfPageWidth, 15, doc.Title, "", 1, "C", false, 0, "")
+	c.pdf.Ln(5)
+
+	// Version
+	c.pdf.SetFont("Arial", "", 14)
+	c.pdf.SetTextColor(100, 100, 100)
+	c.pdf.CellFormat(pdfPageWidth, 8, fmt.Sprintf("Version %s", doc.Version), "", 1, "C", false, 0, "")
+	c.pdf.SetTextColor(0, 0, 0)
+	c.pdf.Ln(20)
+
+	// Description
+	if doc.Description != "" {
+		c.pdf.SetFont("Arial", "", 11)
+		// Clean HTML from description
+		desc := stripHTML(doc.Description)
+		if len(desc) > 500 {
+			desc = desc[:500] + "..."
+		}
+		c.pdf.MultiCell(pdfPageWidth, 6, desc, "", "C", false)
+	}
+
+	c.pdf.Ln(30)
+
+	// API Info
+	c.pdf.SetFont("Arial", "", 10)
+	c.pdf.SetTextColor(128, 128, 128)
+	c.pdf.CellFormat(pdfPageWidth, 6, "OpenAPI Specification Document", "", 1, "C", false, 0, "")
+	c.pdf.SetTextColor(0, 0, 0)
+}
+
+func (c *PDFConverter) addTableOfContents() {
+	c.pdf.AddPage()
+
+	c.pdf.SetFont("Arial", "B", 20)
+	c.pdf.CellFormat(pdfPageWidth, 10, "Table of Contents", "", 1, "", false, 0, "")
+	c.pdf.Ln(8)
+
+	for _, item := range c.tocItems {
+		indent := float64(item.level-1) * 8
+
+		switch item.level {
+		case 1:
+			c.pdf.SetFont("Arial", "B", 12)
+		case 2:
+			c.pdf.SetFont("Arial", "B", 10)
+		default:
+			c.pdf.SetFont("Arial", "", 9)
+		}
+
+		// Title with link
+		c.pdf.SetX(pdfMarginLeft + indent)
+		title := item.title
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+		c.pdf.CellFormat(pdfPageWidth-indent, pdfLineHeight, title, "", 1, "", false, item.linkID, "")
+	}
+}
+
+func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
+	tocIndex := 0
+
+	// Overview section
+	c.pdf.AddPage()
+	c.setLinkDest(tocIndex)
+	tocIndex++
+
+	c.addSectionHeader("Overview")
+
+	if doc.Description != "" {
+		c.pdf.SetFont("Arial", "", 10)
+		c.pdf.MultiCell(pdfPageWidth, 5, stripHTML(doc.Description), "", "", false)
+		c.pdf.Ln(4)
+	}
+
+	// Servers
+	if len(doc.Servers) > 0 {
+		c.checkPageBreak(40)
+		c.setLinkDest(tocIndex)
+		tocIndex++
+
+		c.addSectionHeader("Servers")
+
+		for _, server := range doc.Servers {
+			c.pdf.SetFont("Arial", "B", 10)
+			c.pdf.SetTextColor(0, 102, 204)
+			c.pdf.CellFormat(pdfPageWidth, 6, server.URL, "", 1, "", false, 0, "")
+			c.pdf.SetTextColor(0, 0, 0)
+
+			if server.Description != "" {
+				c.pdf.SetFont("Arial", "", 9)
+				c.pdf.SetTextColor(100, 100, 100)
+				c.pdf.MultiCell(pdfPageWidth, 4, server.Description, "", "", false)
+				c.pdf.SetTextColor(0, 0, 0)
+			}
+			c.pdf.Ln(2)
+		}
+		c.pdf.Ln(4)
+	}
+
+	// API Endpoints header
+	c.pdf.AddPage()
+	c.setLinkDest(tocIndex)
+	tocIndex++
+
+	c.addSectionHeader("API Endpoints")
+	c.pdf.Ln(4)
+
+	// Group by tags
+	tagPaths := c.groupPathsByTag(doc)
+	tags := make([]string, 0, len(tagPaths))
+	for tag := range tagPaths {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+
+	for _, tag := range tags {
+		c.checkPageBreak(30)
+		c.setLinkDest(tocIndex)
+		tocIndex++
+
+		// Tag header
+		c.pdf.SetFont("Arial", "B", 14)
+		c.pdf.SetFillColor(240, 240, 240)
+		c.pdf.CellFormat(pdfPageWidth, 8, tag, "", 1, "", true, 0, "")
+		c.pdf.Ln(4)
+
+		for _, ep := range tagPaths[tag] {
+			c.checkPageBreak(50)
+			c.setLinkDest(tocIndex)
+			tocIndex++
+
+			c.addEndpoint(ep.path, ep.operation)
+		}
+
+		c.pdf.Ln(4)
+	}
+
+	// Components section
+	if len(doc.Components) > 0 {
+		c.pdf.AddPage()
+		c.setLinkDest(tocIndex)
+		tocIndex++
+
+		c.addSectionHeader("Components (Schemas)")
+		c.pdf.Ln(4)
+
+		componentNames := make([]string, 0, len(doc.Components))
+		for name := range doc.Components {
+			componentNames = append(componentNames, name)
+		}
+		sort.Strings(componentNames)
+
+		for _, name := range componentNames {
+			c.checkPageBreak(30)
+			c.setLinkDest(tocIndex)
+			tocIndex++
+
+			c.addComponentSchema(name, doc.Components[name])
+		}
+	}
+}
+
+func (c *PDFConverter) setLinkDest(tocIndex int) {
+	if tocIndex < len(c.tocItems) {
+		c.pdf.SetLink(c.tocItems[tocIndex].linkID, -1, -1)
+	}
+}
+
+func (c *PDFConverter) addSectionHeader(title string) {
+	c.pdf.SetFont("Arial", "B", 18)
+	c.pdf.CellFormat(pdfPageWidth, 10, title, "", 1, "", false, 0, "")
+	c.pdf.Ln(4)
+}
+
+func (c *PDFConverter) addEndpoint(pathStr string, op domain.Operation) {
+	// Method badge with color
+	c.pdf.SetFont("Arial", "B", 11)
+
+	methodColors := map[string][3]int{
+		"GET":     {97, 175, 254},   // Blue
+		"POST":    {73, 204, 144},   // Green
+		"PUT":     {252, 161, 48},   // Orange
+		"DELETE":  {249, 62, 62},    // Red
+		"PATCH":   {80, 227, 194},   // Teal
+		"HEAD":    {144, 97, 249},   // Purple
+		"OPTIONS": {128, 128, 128},  // Gray
+	}
+
+	color := methodColors[op.Method]
+	if color == [3]int{} {
+		color = [3]int{128, 128, 128}
+	}
+
+	c.pdf.SetFillColor(color[0], color[1], color[2])
+	c.pdf.SetTextColor(255, 255, 255)
+	methodWidth := float64(len(op.Method)*3) + 8
+	c.pdf.CellFormat(methodWidth, 7, op.Method, "", 0, "C", true, 0, "")
+
+	// Path
+	c.pdf.SetTextColor(0, 0, 0)
+	c.pdf.SetFont("Arial", "B", 11)
+	c.pdf.CellFormat(pdfPageWidth-methodWidth, 7, " "+pathStr, "", 1, "", false, 0, "")
+	c.pdf.Ln(2)
+
+	// Operation ID
+	if op.OperationID != "" {
+		c.pdf.SetFont("Arial", "", 8)
+		c.pdf.SetTextColor(128, 128, 128)
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("Operation ID: %s", op.OperationID), "", 1, "", false, 0, "")
+		c.pdf.SetTextColor(0, 0, 0)
+	}
+
+	// Summary
+	if op.Summary != "" {
+		c.pdf.SetFont("Arial", "B", 10)
+		c.pdf.MultiCell(pdfPageWidth, 5, stripHTML(op.Summary), "", "", false)
+	}
+
+	// Description
+	if op.Description != "" {
+		c.pdf.SetFont("Arial", "", 9)
+		desc := stripHTML(op.Description)
+		if len(desc) > 500 {
+			desc = desc[:500] + "..."
+		}
+		c.pdf.MultiCell(pdfPageWidth, 4, desc, "", "", false)
+	}
+	c.pdf.Ln(2)
+
+	// Parameters
+	if len(op.Parameters) > 0 {
+		c.addSubHeader("Parameters")
+		c.addParameterTable(op.Parameters)
+	}
+
+	// Request Body
+	if op.RequestBody != nil {
+		c.addSubHeader("Request Body")
+		c.addRequestBody(op.RequestBody)
+	}
+
+	// Responses
+	if len(op.Responses) > 0 {
+		c.addSubHeader("Responses")
+		c.addResponseTable(op.Responses)
+	}
+
+	// Separator
+	c.pdf.Ln(2)
+	c.pdf.SetDrawColor(220, 220, 220)
+	c.pdf.Line(pdfMarginLeft, c.pdf.GetY(), pdfMarginLeft+pdfPageWidth, c.pdf.GetY())
+	c.pdf.SetDrawColor(180, 180, 180) // Reset to standard light gray
+	c.pdf.Ln(6)
+}
+
+func (c *PDFConverter) addSubHeader(title string) {
+	c.pdf.SetFont("Arial", "B", 10)
+	c.pdf.SetTextColor(60, 60, 60)
+	c.pdf.CellFormat(pdfPageWidth, 6, title, "", 1, "", false, 0, "")
+	c.pdf.SetTextColor(0, 0, 0)
+}
+
+func (c *PDFConverter) addParameterTable(params []domain.Parameter) {
+	// Table header
+	c.pdf.SetFont("Arial", "B", 8)
+	c.pdf.SetFillColor(245, 245, 245)
+
+	colWidths := []float64{35, 20, 15, 60, 60}
+	headers := []string{"Name", "In", "Required", "Type", "Description"}
+
+	for i, header := range headers {
+		c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
+	}
+	c.pdf.Ln(-1)
+
+	// Table rows
+	c.pdf.SetFont("Arial", "", 8)
+	for _, param := range params {
+		c.checkPageBreak(10)
+
+		required := "No"
+		if param.Required {
+			required = "Yes"
+		}
+
+		schemaType := param.Schema.Type
+		if param.Schema.Format != "" {
+			schemaType = fmt.Sprintf("%s (%s)", schemaType, param.Schema.Format)
+		}
+		if param.Schema.Ref != "" {
+			schemaType = extractRefName(param.Schema.Ref)
+		}
+
+		desc := stripHTML(param.Description)
+		if len(desc) > 80 {
+			desc = desc[:77] + "..."
+		}
+
+		c.pdf.CellFormat(colWidths[0], 6, param.Name, "1", 0, "", false, 0, "")
+		c.pdf.CellFormat(colWidths[1], 6, param.In, "1", 0, "", false, 0, "")
+		c.pdf.CellFormat(colWidths[2], 6, required, "1", 0, "C", false, 0, "")
+		c.pdf.CellFormat(colWidths[3], 6, schemaType, "1", 0, "", false, 0, "")
+		c.pdf.CellFormat(colWidths[4], 6, desc, "1", 0, "", false, 0, "")
+		c.pdf.Ln(-1)
+	}
+	c.pdf.Ln(3)
+}
+
+func (c *PDFConverter) addRequestBody(rb *domain.RequestBody) {
+	if rb.Required {
+		c.pdf.SetFont("Arial", "I", 9)
+		c.pdf.SetTextColor(180, 0, 0)
+		c.pdf.CellFormat(pdfPageWidth, 5, "Required", "", 1, "", false, 0, "")
+		c.pdf.SetTextColor(0, 0, 0)
+	}
+
+	if rb.Description != "" {
+		c.pdf.SetFont("Arial", "", 9)
+		c.pdf.MultiCell(pdfPageWidth, 4, stripHTML(rb.Description), "", "", false)
+	}
+
+	// Content types
+	for contentType, media := range rb.Content {
+		c.pdf.SetFont("Arial", "B", 9)
+		c.pdf.CellFormat(pdfPageWidth, 5, fmt.Sprintf("Content-Type: %s", contentType), "", 1, "", false, 0, "")
+
+		// Schema info
+		c.addSchemaInfo(media.Schema, 0)
+	}
+	c.pdf.Ln(2)
+}
+
+func (c *PDFConverter) addSchemaInfo(schema domain.Schema, indent int) {
+	c.pdf.SetFont("Arial", "", 8)
+	indentStr := strings.Repeat("  ", indent)
+
+	if schema.Ref != "" {
+		refName := extractRefName(schema.Ref)
+		linkID := c.componentLinks[refName]
+		c.pdf.SetTextColor(0, 102, 204)
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sSchema: %s", indentStr, refName), "", 1, "", false, linkID, "")
+		c.pdf.SetTextColor(0, 0, 0)
+		return
+	}
+
+	schemaType := schema.Type
+	if schema.Format != "" {
+		schemaType = fmt.Sprintf("%s (%s)", schemaType, schema.Format)
+	}
+
+	if schemaType != "" {
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sType: %s", indentStr, schemaType), "", 1, "", false, 0, "")
+	}
+
+	if schema.Description != "" {
+		desc := stripHTML(schema.Description)
+		if len(desc) > 100 {
+			desc = desc[:97] + "..."
+		}
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%s%s", indentStr, desc), "", 1, "", false, 0, "")
+	}
+
+	// Properties
+	if len(schema.Properties) > 0 {
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sProperties:", indentStr), "", 1, "", false, 0, "")
+		for name, prop := range schema.Properties {
+			propType := prop.Type
+			if prop.Ref != "" {
+				propType = extractRefName(prop.Ref)
+			}
+			c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%s  - %s: %s", indentStr, name, propType), "", 1, "", false, 0, "")
+		}
+	}
+
+	// Array items
+	if schema.Items != nil {
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sItems:", indentStr), "", 1, "", false, 0, "")
+		c.addSchemaInfo(*schema.Items, indent+1)
+	}
+}
+
+func (c *PDFConverter) addResponseTable(responses []domain.Response) {
+	// Sort responses by status code
+	sort.Slice(responses, func(i, j int) bool {
+		return responses[i].StatusCode < responses[j].StatusCode
+	})
+
+	// Table header
+	c.pdf.SetFont("Arial", "B", 8)
+	c.pdf.SetFillColor(245, 245, 245)
+
+	colWidths := []float64{25, 95, 70}
+	headers := []string{"Status", "Description", "Schema"}
+
+	for i, header := range headers {
+		c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
+	}
+	c.pdf.Ln(-1)
+
+	// Table rows
+	c.pdf.SetFont("Arial", "", 8)
+	for _, resp := range responses {
+		c.checkPageBreak(10)
+
+		desc := stripHTML(resp.Description)
+		if len(desc) > 55 {
+			desc = desc[:52] + "..."
+		}
+
+		// Get schema reference
+		schemaRef := ""
+		var schemaLinkID int
+		for _, media := range resp.Content {
+			if media.Schema.Ref != "" {
+				refName := extractRefName(media.Schema.Ref)
+				schemaRef = refName
+				schemaLinkID = c.componentLinks[refName]
+				break
+			} else if media.Schema.Type != "" {
+				schemaRef = media.Schema.Type
+			}
+		}
+
+		// Color code status
+		switch {
+		case strings.HasPrefix(resp.StatusCode, "2"):
+			c.pdf.SetTextColor(0, 128, 0)
+		case strings.HasPrefix(resp.StatusCode, "4"):
+			c.pdf.SetTextColor(200, 100, 0)
+		case strings.HasPrefix(resp.StatusCode, "5"):
+			c.pdf.SetTextColor(180, 0, 0)
+		default:
+			c.pdf.SetTextColor(0, 0, 0)
+		}
+
+		c.pdf.CellFormat(colWidths[0], 6, resp.StatusCode, "1", 0, "C", false, 0, "")
+		c.pdf.SetTextColor(0, 0, 0)
+		c.pdf.CellFormat(colWidths[1], 6, desc, "1", 0, "", false, 0, "")
+
+		// Schema with link
+		if schemaLinkID > 0 {
+			c.pdf.SetTextColor(0, 102, 204)
+			c.pdf.CellFormat(colWidths[2], 6, schemaRef, "1", 0, "", false, schemaLinkID, "")
+			c.pdf.SetTextColor(0, 0, 0)
+		} else {
+			c.pdf.CellFormat(colWidths[2], 6, schemaRef, "1", 0, "", false, 0, "")
+		}
+		c.pdf.Ln(-1)
+	}
+	c.pdf.Ln(3)
+}
+
+func (c *PDFConverter) checkPageBreak(height float64) {
+	_, pageHeight := c.pdf.GetPageSize()
+	_, _, _, bottomMargin := c.pdf.GetMargins()
+
+	if c.pdf.GetY()+height > pageHeight-bottomMargin-10 {
+		c.pdf.AddPage()
+	}
+}
+
+func stripHTML(s string) string {
+	// Simple HTML tag removal
+	result := s
+	for {
+		start := strings.Index(result, "<")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], ">")
+		if end == -1 {
+			break
+		}
+		result = result[:start] + result[start+end+1:]
+	}
+	// Clean up common HTML entities
+	result = strings.ReplaceAll(result, "&amp;", "&")
+	result = strings.ReplaceAll(result, "&lt;", "<")
+	result = strings.ReplaceAll(result, "&gt;", ">")
+	result = strings.ReplaceAll(result, "&quot;", "\"")
+	result = strings.ReplaceAll(result, "&#39;", "'")
+	result = strings.ReplaceAll(result, "\n\n", "\n")
+	return strings.TrimSpace(result)
+}
+
+func extractRefName(ref string) string {
+	parts := strings.Split(ref, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ref
+}
+
+func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
+	// Component name header
+	c.pdf.SetFont("Arial", "B", 11)
+	c.pdf.SetFillColor(248, 248, 248)
+	c.pdf.CellFormat(pdfPageWidth, 7, name, "1", 1, "", true, 0, "")
+
+	// Type
+	if schema.Type != "" {
+		c.pdf.SetFont("Arial", "", 9)
+		typeStr := schema.Type
+		if schema.Format != "" {
+			typeStr = fmt.Sprintf("%s (%s)", schema.Type, schema.Format)
+		}
+		c.pdf.CellFormat(pdfPageWidth, 5, fmt.Sprintf("Type: %s", typeStr), "", 1, "", false, 0, "")
+	}
+
+	// Description
+	if schema.Description != "" {
+		c.pdf.SetFont("Arial", "", 9)
+		c.pdf.SetTextColor(100, 100, 100)
+		desc := stripHTML(schema.Description)
+		if len(desc) > 200 {
+			desc = desc[:197] + "..."
+		}
+		c.pdf.MultiCell(pdfPageWidth, 4, desc, "", "", false)
+		c.pdf.SetTextColor(0, 0, 0)
+	}
+
+	// Properties table
+	if len(schema.Properties) > 0 {
+		c.pdf.Ln(2)
+		c.pdf.SetFont("Arial", "B", 9)
+		c.pdf.CellFormat(pdfPageWidth, 5, "Properties:", "", 1, "", false, 0, "")
+
+		// Table header
+		c.pdf.SetFont("Arial", "B", 8)
+		c.pdf.SetFillColor(245, 245, 245)
+		propColWidths := []float64{50, 50, 90}
+		propHeaders := []string{"Name", "Type", "Description"}
+
+		for i, header := range propHeaders {
+			c.pdf.CellFormat(propColWidths[i], 5, header, "1", 0, "", true, 0, "")
+		}
+		c.pdf.Ln(-1)
+
+		// Property rows
+		c.pdf.SetFont("Arial", "", 8)
+		propNames := make([]string, 0, len(schema.Properties))
+		for propName := range schema.Properties {
+			propNames = append(propNames, propName)
+		}
+		sort.Strings(propNames)
+
+		for _, propName := range propNames {
+			prop := schema.Properties[propName]
+			c.checkPageBreak(8)
+
+			propType := prop.Type
+			var propLinkID int
+			if prop.Ref != "" {
+				refName := extractRefName(prop.Ref)
+				propType = refName
+				propLinkID = c.componentLinks[refName]
+			} else if prop.Format != "" {
+				propType = fmt.Sprintf("%s (%s)", prop.Type, prop.Format)
+			}
+
+			propDesc := stripHTML(prop.Description)
+			if len(propDesc) > 60 {
+				propDesc = propDesc[:57] + "..."
+			}
+
+			c.pdf.CellFormat(propColWidths[0], 5, propName, "1", 0, "", false, 0, "")
+
+			// Type with optional link
+			if propLinkID > 0 {
+				c.pdf.SetTextColor(0, 102, 204)
+				c.pdf.CellFormat(propColWidths[1], 5, propType, "1", 0, "", false, propLinkID, "")
+				c.pdf.SetTextColor(0, 0, 0)
+			} else {
+				c.pdf.CellFormat(propColWidths[1], 5, propType, "1", 0, "", false, 0, "")
+			}
+
+			c.pdf.CellFormat(propColWidths[2], 5, propDesc, "1", 0, "", false, 0, "")
+			c.pdf.Ln(-1)
+		}
+	}
+
+	c.pdf.Ln(6)
+}
