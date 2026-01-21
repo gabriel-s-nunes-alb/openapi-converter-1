@@ -24,7 +24,8 @@ type PDFConverter struct {
 	pdf            *gofpdf.Fpdf
 	tocItems       []tocItem
 	linkID         int
-	componentLinks map[string]int // Map component name to link ID
+	componentLinks map[string]int // Map "tag:component" to link ID
+	currentTag     string         // Current tag context for link resolution
 }
 
 type tocItem struct {
@@ -52,6 +53,7 @@ func (c *PDFConverter) Convert(doc *domain.OpenAPIDocument, output io.Writer) er
 	c.tocItems = nil
 	c.linkID = 0
 	c.componentLinks = make(map[string]int)
+	c.currentTag = ""
 
 	// First pass: collect TOC items with placeholder pages
 	c.collectTOC(doc)
@@ -84,6 +86,15 @@ func (c *PDFConverter) collectTOC(doc *domain.OpenAPIDocument) {
 	}
 	sort.Strings(tags)
 
+	// Pre-create links for all tag+component combinations
+	for _, tag := range tags {
+		tagComponents := c.collectTagComponents(tagPaths[tag])
+		for _, compName := range tagComponents {
+			key := tag + ":" + compName
+			c.componentLinks[key] = c.pdf.AddLink()
+		}
+	}
+
 	// Add Endpoints section
 	c.tocItems = append(c.tocItems, tocItem{title: "API Endpoints", level: 1, linkID: c.pdf.AddLink()})
 
@@ -95,23 +106,54 @@ func (c *PDFConverter) collectTOC(doc *domain.OpenAPIDocument) {
 			c.tocItems = append(c.tocItems, tocItem{title: title, level: 3, linkID: c.pdf.AddLink()})
 		}
 	}
+}
 
-	// Add Components section
-	if len(doc.Components) > 0 {
-		c.tocItems = append(c.tocItems, tocItem{title: "Components", level: 1, linkID: c.pdf.AddLink()})
+// collectTagComponents gathers all unique component names used by endpoints in a tag.
+func (c *PDFConverter) collectTagComponents(endpoints []endpointRef) []string {
+	componentSet := make(map[string]struct{})
 
-		// Create links for each component
-		componentNames := make([]string, 0, len(doc.Components))
-		for name := range doc.Components {
-			componentNames = append(componentNames, name)
+	for _, ep := range endpoints {
+		// Check request body
+		if ep.operation.RequestBody != nil {
+			for _, media := range ep.operation.RequestBody.Content {
+				c.collectSchemaRefs(media.Schema, componentSet)
+			}
 		}
-		sort.Strings(componentNames)
 
-		for _, name := range componentNames {
-			linkID := c.pdf.AddLink()
-			c.componentLinks[name] = linkID
-			c.tocItems = append(c.tocItems, tocItem{title: name, level: 2, linkID: linkID})
+		// Check responses
+		for _, resp := range ep.operation.Responses {
+			for _, media := range resp.Content {
+				c.collectSchemaRefs(media.Schema, componentSet)
+			}
 		}
+
+		// Check parameters
+		for _, param := range ep.operation.Parameters {
+			c.collectSchemaRefs(param.Schema, componentSet)
+		}
+	}
+
+	// Convert set to sorted slice
+	components := make([]string, 0, len(componentSet))
+	for name := range componentSet {
+		components = append(components, name)
+	}
+	sort.Strings(components)
+	return components
+}
+
+// collectSchemaRefs recursively collects component references from a schema.
+func (c *PDFConverter) collectSchemaRefs(schema domain.Schema, refs map[string]struct{}) {
+	if schema.Ref != "" {
+		refs[extractRefName(schema.Ref)] = struct{}{}
+	}
+
+	for _, prop := range schema.Properties {
+		c.collectSchemaRefs(prop, refs)
+	}
+
+	if schema.Items != nil {
+		c.collectSchemaRefs(*schema.Items, refs)
 	}
 }
 
@@ -287,6 +329,15 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 		c.pdf.CellFormat(pdfPageWidth, 8, tag, "", 1, "", true, 0, "")
 		c.pdf.Ln(4)
 
+		// Set current tag context for link resolution
+		c.currentTag = tag
+
+		// Add components used by this tag's endpoints at the top
+		tagComponents := c.collectTagComponents(tagPaths[tag])
+		if len(tagComponents) > 0 {
+			c.addTagComponents(tag, tagComponents, doc.Components)
+		}
+
 		for _, ep := range tagPaths[tag] {
 			c.checkPageBreak(50)
 			c.setLinkDest(tocIndex)
@@ -296,30 +347,6 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 		}
 
 		c.pdf.Ln(4)
-	}
-
-	// Components section
-	if len(doc.Components) > 0 {
-		c.pdf.AddPage()
-		c.setLinkDest(tocIndex)
-		tocIndex++
-
-		c.addSectionHeader("Components (Schemas)")
-		c.pdf.Ln(4)
-
-		componentNames := make([]string, 0, len(doc.Components))
-		for name := range doc.Components {
-			componentNames = append(componentNames, name)
-		}
-		sort.Strings(componentNames)
-
-		for _, name := range componentNames {
-			c.checkPageBreak(30)
-			c.setLinkDest(tocIndex)
-			tocIndex++
-
-			c.addComponentSchema(name, doc.Components[name])
-		}
 	}
 }
 
@@ -340,13 +367,13 @@ func (c *PDFConverter) addEndpoint(pathStr string, op domain.Operation) {
 	c.pdf.SetFont("Arial", "B", 11)
 
 	methodColors := map[string][3]int{
-		"GET":     {97, 175, 254},   // Blue
-		"POST":    {73, 204, 144},   // Green
-		"PUT":     {252, 161, 48},   // Orange
-		"DELETE":  {249, 62, 62},    // Red
-		"PATCH":   {80, 227, 194},   // Teal
-		"HEAD":    {144, 97, 249},   // Purple
-		"OPTIONS": {128, 128, 128},  // Gray
+		"GET":     {97, 175, 254},  // Blue
+		"POST":    {73, 204, 144},  // Green
+		"PUT":     {252, 161, 48},  // Orange
+		"DELETE":  {249, 62, 62},   // Red
+		"PATCH":   {80, 227, 194},  // Teal
+		"HEAD":    {144, 97, 249},  // Purple
+		"OPTIONS": {128, 128, 128}, // Gray
 	}
 
 	color := methodColors[op.Method]
@@ -499,7 +526,8 @@ func (c *PDFConverter) addSchemaInfo(schema domain.Schema, indent int) {
 
 	if schema.Ref != "" {
 		refName := extractRefName(schema.Ref)
-		linkID := c.componentLinks[refName]
+		key := c.currentTag + ":" + refName
+		linkID := c.componentLinks[key]
 		c.pdf.SetTextColor(0, 102, 204)
 		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sSchema: %s", indentStr, refName), "", 1, "", false, linkID, "")
 		c.pdf.SetTextColor(0, 0, 0)
@@ -577,7 +605,9 @@ func (c *PDFConverter) addResponseTable(responses []domain.Response) {
 			if media.Schema.Ref != "" {
 				refName := extractRefName(media.Schema.Ref)
 				schemaRef = refName
-				schemaLinkID = c.componentLinks[refName]
+				key := c.currentTag + ":" + refName
+				schemaLinkID = c.componentLinks[key]
+
 				break
 			} else if media.Schema.Type != "" {
 				schemaRef = media.Schema.Type
@@ -716,7 +746,8 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 			if prop.Ref != "" {
 				refName := extractRefName(prop.Ref)
 				propType = refName
-				propLinkID = c.componentLinks[refName]
+				key := c.currentTag + ":" + refName
+				propLinkID = c.componentLinks[key]
 			} else if prop.Format != "" {
 				propType = fmt.Sprintf("%s (%s)", prop.Type, prop.Format)
 			}
@@ -742,5 +773,37 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 		}
 	}
 
+	c.pdf.Ln(6)
+}
+
+// addTagComponents renders the component schemas used by endpoints in a tag.
+func (c *PDFConverter) addTagComponents(tag string, componentNames []string, components map[string]domain.Schema) {
+	c.pdf.SetFont("Arial", "B", 11)
+	c.pdf.SetTextColor(60, 60, 60)
+	c.pdf.CellFormat(pdfPageWidth, 6, "Schemas Used", "", 1, "", false, 0, "")
+	c.pdf.SetTextColor(0, 0, 0)
+	c.pdf.Ln(2)
+
+	for _, name := range componentNames {
+		schema, exists := components[name]
+		if !exists {
+			continue
+		}
+
+		c.checkPageBreak(30)
+
+		// Set the link destination for this tag+component
+		key := tag + ":" + name
+		if linkID, ok := c.componentLinks[key]; ok {
+			c.pdf.SetLink(linkID, -1, -1)
+		}
+
+		c.addComponentSchema(name, schema)
+	}
+
+	// Separator after components
+	c.pdf.Ln(2)
+	c.pdf.SetDrawColor(180, 180, 180)
+	c.pdf.Line(pdfMarginLeft, c.pdf.GetY(), pdfMarginLeft+pdfPageWidth, c.pdf.GetY())
 	c.pdf.Ln(6)
 }
