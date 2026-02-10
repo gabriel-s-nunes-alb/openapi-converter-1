@@ -217,9 +217,6 @@ func (c *PDFConverter) addTitlePage(doc *domain.OpenAPIDocument) {
 		c.pdf.SetFont("Arial", "", 11)
 		// Clean HTML from description
 		desc := stripHTML(doc.Description)
-		if len(desc) > 500 {
-			desc = desc[:500] + "..."
-		}
 		c.pdf.MultiCell(pdfPageWidth, 6, desc, "", "C", false)
 	}
 
@@ -310,6 +307,12 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 	c.addSectionHeader("API Endpoints")
 	c.pdf.Ln(4)
 
+	// Create lookup for tag descriptions
+	tagDescs := make(map[string]string)
+	for _, t := range doc.Tags {
+		tagDescs[t.Name] = t.Description
+	}
+
 	// Group by tags
 	tagPaths := c.groupPathsByTag(doc)
 	tags := make([]string, 0, len(tagPaths))
@@ -319,7 +322,7 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 	sort.Strings(tags)
 
 	for _, tag := range tags {
-		c.checkPageBreak(30)
+		c.pdf.AddPage()
 		c.setLinkDest(tocIndex)
 		tocIndex++
 
@@ -332,11 +335,16 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 		// Set current tag context for link resolution
 		c.currentTag = tag
 
-		// Add components used by this tag's endpoints at the top
-		tagComponents := c.collectTagComponents(tagPaths[tag])
-		if len(tagComponents) > 0 {
-			c.addTagComponents(tag, tagComponents, doc.Components)
+		// Tag description
+		if desc, ok := tagDescs[tag]; ok && desc != "" {
+			c.pdf.SetFont("Arial", "", 10)
+			c.pdf.MultiCell(pdfPageWidth, 5, stripHTML(desc), "", "", false)
+			c.pdf.Ln(4)
 		}
+
+		// Endpoints Summary
+		c.addEndpointsSummary(tagPaths[tag], tocIndex)
+		c.pdf.Ln(6)
 
 		for _, ep := range tagPaths[tag] {
 			c.checkPageBreak(50)
@@ -344,6 +352,16 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 			tocIndex++
 
 			c.addEndpoint(ep.path, ep.operation)
+		}
+
+		// Add components used by this tag's endpoints at the bottom
+		tagComponents := c.collectTagComponents(tagPaths[tag])
+		if len(tagComponents) > 0 {
+			c.pdf.Ln(6)
+			c.pdf.SetDrawColor(180, 180, 180)
+			c.pdf.Line(pdfMarginLeft, c.pdf.GetY(), pdfMarginLeft+pdfPageWidth, c.pdf.GetY())
+			c.pdf.Ln(6)
+			c.addTagComponents(tag, tagComponents, doc.Components)
 		}
 
 		c.pdf.Ln(4)
@@ -410,9 +428,6 @@ func (c *PDFConverter) addEndpoint(pathStr string, op domain.Operation) {
 	if op.Description != "" {
 		c.pdf.SetFont("Arial", "", 9)
 		desc := stripHTML(op.Description)
-		if len(desc) > 500 {
-			desc = desc[:500] + "..."
-		}
 		c.pdf.MultiCell(pdfPageWidth, 4, desc, "", "", false)
 	}
 	c.pdf.Ln(2)
@@ -466,8 +481,6 @@ func (c *PDFConverter) addParameterTable(params []domain.Parameter) {
 	// Table rows
 	c.pdf.SetFont("Arial", "", 8)
 	for _, param := range params {
-		c.checkPageBreak(10)
-
 		required := "No"
 		if param.Required {
 			required = "Yes"
@@ -482,16 +495,11 @@ func (c *PDFConverter) addParameterTable(params []domain.Parameter) {
 		}
 
 		desc := stripHTML(param.Description)
-		if len(desc) > 80 {
-			desc = desc[:77] + "..."
-		}
 
-		c.pdf.CellFormat(colWidths[0], 6, param.Name, "1", 0, "", false, 0, "")
-		c.pdf.CellFormat(colWidths[1], 6, param.In, "1", 0, "", false, 0, "")
-		c.pdf.CellFormat(colWidths[2], 6, required, "1", 0, "C", false, 0, "")
-		c.pdf.CellFormat(colWidths[3], 6, schemaType, "1", 0, "", false, 0, "")
-		c.pdf.CellFormat(colWidths[4], 6, desc, "1", 0, "", false, 0, "")
-		c.pdf.Ln(-1)
+		contents := []string{param.Name, param.In, required, schemaType, desc}
+		aligns := []string{"L", "L", "C", "L", "L"}
+		
+		c.addTableRow(colWidths, contents, aligns, nil)
 	}
 	c.pdf.Ln(3)
 }
@@ -499,7 +507,7 @@ func (c *PDFConverter) addParameterTable(params []domain.Parameter) {
 func (c *PDFConverter) addRequestBody(rb *domain.RequestBody) {
 	if rb.Required {
 		c.pdf.SetFont("Arial", "I", 9)
-		c.pdf.SetTextColor(180, 0, 0)
+		c.pdf.SetTextColor(60, 60, 60)
 		c.pdf.CellFormat(pdfPageWidth, 5, "Required", "", 1, "", false, 0, "")
 		c.pdf.SetTextColor(0, 0, 0)
 	}
@@ -510,12 +518,64 @@ func (c *PDFConverter) addRequestBody(rb *domain.RequestBody) {
 	}
 
 	// Content types
-	for contentType, media := range rb.Content {
-		c.pdf.SetFont("Arial", "B", 9)
-		c.pdf.CellFormat(pdfPageWidth, 5, fmt.Sprintf("Content-Type: %s", contentType), "", 1, "", false, 0, "")
+	if len(rb.Content) > 0 {
+		c.pdf.Ln(2)
+		c.pdf.SetFont("Arial", "B", 8)
+		c.pdf.SetFillColor(245, 245, 245)
 
-		// Schema info
-		c.addSchemaInfo(media.Schema, 0)
+		colWidths := []float64{60, 130}
+		headers := []string{"Content-Type", "Object"}
+
+		for i, header := range headers {
+			c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
+		}
+		c.pdf.Ln(-1)
+
+		c.pdf.SetFont("Arial", "", 8)
+
+		contentTypes := make([]string, 0, len(rb.Content))
+		for ct := range rb.Content {
+			contentTypes = append(contentTypes, ct)
+		}
+		sort.Strings(contentTypes)
+
+		for _, contentType := range contentTypes {
+			media := rb.Content[contentType]
+			
+			objectStr := ""
+			var linkID int
+
+			if media.Schema.Ref != "" {
+				refName := extractRefName(media.Schema.Ref)
+				objectStr = refName
+				key := c.currentTag + ":" + refName
+				linkID = c.componentLinks[key]
+			} else {
+				objectStr = media.Schema.Type
+				if media.Schema.Format != "" {
+					objectStr = fmt.Sprintf("%s (%s)", objectStr, media.Schema.Format)
+				}
+				if objectStr == "array" && media.Schema.Items != nil {
+					itemType := media.Schema.Items.Type
+					if media.Schema.Items.Ref != "" {
+						refName := extractRefName(media.Schema.Items.Ref)
+						itemType = refName
+						key := c.currentTag + ":" + refName
+						linkID = c.componentLinks[key]
+					}
+					objectStr = fmt.Sprintf("[]%s", itemType)
+				}
+				if objectStr == "" {
+					objectStr = "Object"
+				}
+			}
+
+			contents := []string{contentType, objectStr}
+			aligns := []string{"L", "L"}
+			linkIDs := []int{0, linkID}
+			
+			c.addTableRow(colWidths, contents, aligns, linkIDs)
+		}
 	}
 	c.pdf.Ln(2)
 }
@@ -529,7 +589,7 @@ func (c *PDFConverter) addSchemaInfo(schema domain.Schema, indent int) {
 		key := c.currentTag + ":" + refName
 		linkID := c.componentLinks[key]
 		c.pdf.SetTextColor(0, 102, 204)
-		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sSchema: %s", indentStr, refName), "", 1, "", false, linkID, "")
+		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sObject: %s", indentStr, refName), "", 1, "", false, linkID, "")
 		c.pdf.SetTextColor(0, 0, 0)
 		return
 	}
@@ -539,16 +599,18 @@ func (c *PDFConverter) addSchemaInfo(schema domain.Schema, indent int) {
 		schemaType = fmt.Sprintf("%s (%s)", schemaType, schema.Format)
 	}
 
-	if schemaType != "" {
+	if schemaType != "" && schemaType != "object" {
 		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%sType: %s", indentStr, schemaType), "", 1, "", false, 0, "")
 	}
 
 	if schema.Description != "" {
 		desc := stripHTML(schema.Description)
-		if len(desc) > 100 {
-			desc = desc[:97] + "..."
-		}
-		c.pdf.CellFormat(pdfPageWidth, 4, fmt.Sprintf("%s%s", indentStr, desc), "", 1, "", false, 0, "")
+		
+		// Handle indentation for description
+		indentWidth := c.pdf.GetStringWidth(strings.Repeat("  ", indent))
+		currentX := c.pdf.GetX()
+		c.pdf.SetX(currentX + indentWidth)
+		c.pdf.MultiCell(pdfPageWidth-indentWidth, 4, desc, "", "", false)
 	}
 
 	// Properties
@@ -581,7 +643,7 @@ func (c *PDFConverter) addResponseTable(responses []domain.Response) {
 	c.pdf.SetFillColor(245, 245, 245)
 
 	colWidths := []float64{25, 95, 70}
-	headers := []string{"Status", "Description", "Schema"}
+	headers := []string{"Status", "Description", "Object"}
 
 	for i, header := range headers {
 		c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
@@ -591,12 +653,7 @@ func (c *PDFConverter) addResponseTable(responses []domain.Response) {
 	// Table rows
 	c.pdf.SetFont("Arial", "", 8)
 	for _, resp := range responses {
-		c.checkPageBreak(10)
-
 		desc := stripHTML(resp.Description)
-		if len(desc) > 55 {
-			desc = desc[:52] + "..."
-		}
 
 		// Get schema reference
 		schemaRef := ""
@@ -615,30 +672,17 @@ func (c *PDFConverter) addResponseTable(responses []domain.Response) {
 		}
 
 		// Color code status
-		switch {
-		case strings.HasPrefix(resp.StatusCode, "2"):
-			c.pdf.SetTextColor(0, 128, 0)
-		case strings.HasPrefix(resp.StatusCode, "4"):
-			c.pdf.SetTextColor(200, 100, 0)
-		case strings.HasPrefix(resp.StatusCode, "5"):
-			c.pdf.SetTextColor(180, 0, 0)
-		default:
-			c.pdf.SetTextColor(0, 0, 0)
-		}
-
-		c.pdf.CellFormat(colWidths[0], 6, resp.StatusCode, "1", 0, "C", false, 0, "")
-		c.pdf.SetTextColor(0, 0, 0)
-		c.pdf.CellFormat(colWidths[1], 6, desc, "1", 0, "", false, 0, "")
-
-		// Schema with link
-		if schemaLinkID > 0 {
-			c.pdf.SetTextColor(0, 102, 204)
-			c.pdf.CellFormat(colWidths[2], 6, schemaRef, "1", 0, "", false, schemaLinkID, "")
-			c.pdf.SetTextColor(0, 0, 0)
-		} else {
-			c.pdf.CellFormat(colWidths[2], 6, schemaRef, "1", 0, "", false, 0, "")
-		}
-		c.pdf.Ln(-1)
+		// Note: color change only affects the status code text if we set it before drawing
+		// But addTableRow doesn't support per-cell text color yet unless we enhance it.
+		// For simplicity, we drop the color feature for status code or we have to enhance addTableRow.
+		// Or we can just set color inside addTableRow if we pass it? 
+		// Actually typical tables don't need colored status codes desperately, but let's keep it simple.
+		
+		contents := []string{resp.StatusCode, desc, schemaRef}
+		aligns := []string{"C", "L", "L"}
+		linkIDs := []int{0, 0, schemaLinkID}
+		
+		c.addTableRow(colWidths, contents, aligns, linkIDs)
 	}
 	c.pdf.Ln(3)
 }
@@ -685,13 +729,12 @@ func extractRefName(ref string) string {
 }
 
 func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
-	// Component name header
-	c.pdf.SetFont("Arial", "B", 11)
-	c.pdf.SetFillColor(248, 248, 248)
-	c.pdf.CellFormat(pdfPageWidth, 7, name, "1", 1, "", true, 0, "")
+	// Component name as Title
+	c.pdf.SetFont("Arial", "B", 12)
+	c.pdf.CellFormat(pdfPageWidth, 7, name, "", 1, "", false, 0, "")
 
 	// Type
-	if schema.Type != "" {
+	if schema.Type != "" && schema.Type != "object" {
 		c.pdf.SetFont("Arial", "", 9)
 		typeStr := schema.Type
 		if schema.Format != "" {
@@ -705,9 +748,6 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 		c.pdf.SetFont("Arial", "", 9)
 		c.pdf.SetTextColor(100, 100, 100)
 		desc := stripHTML(schema.Description)
-		if len(desc) > 200 {
-			desc = desc[:197] + "..."
-		}
 		c.pdf.MultiCell(pdfPageWidth, 4, desc, "", "", false)
 		c.pdf.SetTextColor(0, 0, 0)
 	}
@@ -715,8 +755,11 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 	// Properties table
 	if len(schema.Properties) > 0 {
 		c.pdf.Ln(2)
+
+		// Component Name Header
 		c.pdf.SetFont("Arial", "B", 9)
-		c.pdf.CellFormat(pdfPageWidth, 5, "Properties:", "", 1, "", false, 0, "")
+		c.pdf.SetFillColor(245, 245, 245)
+		c.pdf.CellFormat(pdfPageWidth, 6, name, "1", 1, "C", true, 0, "")
 
 		// Table header
 		c.pdf.SetFont("Arial", "B", 8)
@@ -739,7 +782,6 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 
 		for _, propName := range propNames {
 			prop := schema.Properties[propName]
-			c.checkPageBreak(8)
 
 			propType := prop.Type
 			var propLinkID int
@@ -753,23 +795,12 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 			}
 
 			propDesc := stripHTML(prop.Description)
-			if len(propDesc) > 60 {
-				propDesc = propDesc[:57] + "..."
-			}
 
-			c.pdf.CellFormat(propColWidths[0], 5, propName, "1", 0, "", false, 0, "")
-
-			// Type with optional link
-			if propLinkID > 0 {
-				c.pdf.SetTextColor(0, 102, 204)
-				c.pdf.CellFormat(propColWidths[1], 5, propType, "1", 0, "", false, propLinkID, "")
-				c.pdf.SetTextColor(0, 0, 0)
-			} else {
-				c.pdf.CellFormat(propColWidths[1], 5, propType, "1", 0, "", false, 0, "")
-			}
-
-			c.pdf.CellFormat(propColWidths[2], 5, propDesc, "1", 0, "", false, 0, "")
-			c.pdf.Ln(-1)
+			contents := []string{propName, propType, propDesc}
+			aligns := []string{"L", "L", "L"}
+			linkIDs := []int{0, propLinkID, 0}
+			
+			c.addTableRow(propColWidths, contents, aligns, linkIDs)
 		}
 	}
 
@@ -780,7 +811,7 @@ func (c *PDFConverter) addComponentSchema(name string, schema domain.Schema) {
 func (c *PDFConverter) addTagComponents(tag string, componentNames []string, components map[string]domain.Schema) {
 	c.pdf.SetFont("Arial", "B", 11)
 	c.pdf.SetTextColor(60, 60, 60)
-	c.pdf.CellFormat(pdfPageWidth, 6, "Schemas Used", "", 1, "", false, 0, "")
+	c.pdf.CellFormat(pdfPageWidth, 6, "Objects Used", "", 1, "", false, 0, "")
 	c.pdf.SetTextColor(0, 0, 0)
 	c.pdf.Ln(2)
 
@@ -806,4 +837,106 @@ func (c *PDFConverter) addTagComponents(tag string, componentNames []string, com
 	c.pdf.SetDrawColor(180, 180, 180)
 	c.pdf.Line(pdfMarginLeft, c.pdf.GetY(), pdfMarginLeft+pdfPageWidth, c.pdf.GetY())
 	c.pdf.Ln(6)
+}
+
+func (c *PDFConverter) addTableRow(colWidths []float64, contents []string, aligns []string, linkIDs []int) {
+	// Calculate max height based on content wrapping
+	maxLines := 1
+	for i, content := range contents {
+		width := colWidths[i]
+		lines := c.pdf.SplitLines([]byte(content), width)
+		if len(lines) > maxLines {
+			maxLines = len(lines)
+		}
+	}
+
+	rowHeight := float64(maxLines) * 5.0 // 5.0 is base line height for cells
+
+	c.checkPageBreak(rowHeight)
+
+	// Draw cells
+	startX := c.pdf.GetX()
+	startY := c.pdf.GetY()
+
+	for i, content := range contents {
+		width := colWidths[i]
+		
+		align := ""
+		if len(aligns) > i {
+			align = aligns[i]
+		}
+		
+		linkID := 0
+		if len(linkIDs) > i {
+			linkID = linkIDs[i]
+		}
+		
+		// If linkID is present, set text color blue
+		if linkID > 0 {
+			c.pdf.SetTextColor(0, 102, 204)
+		}
+
+		// Draw content
+		c.pdf.SetXY(startX, startY)
+		c.pdf.MultiCell(width, 5.0, content, "0", align, false)
+		if linkID > 0 {
+			// Add link over the area
+			c.pdf.Link(startX, startY, width, rowHeight, linkID)
+			c.pdf.SetTextColor(0, 0, 0) // Reset color
+		}
+
+		// Draw border
+		c.pdf.Rect(startX, startY, width, rowHeight, "D")
+		
+		// Move X for next cell
+		startX += width
+	}
+	
+	// Move cursor to next row
+	c.pdf.SetXY(pdfMarginLeft, startY+rowHeight)
+}
+
+func (c *PDFConverter) addEndpointsSummary(endpoints []endpointRef, startTocIndex int) {
+	if len(endpoints) == 0 {
+		return
+	}
+
+	c.pdf.SetFont("Arial", "B", 11)
+	c.pdf.CellFormat(pdfPageWidth, 6, "Endpoints in this section", "", 1, "", false, 0, "")
+	c.pdf.Ln(2)
+
+	// Table header
+	c.pdf.SetFont("Arial", "B", 9)
+	c.pdf.SetFillColor(245, 245, 245)
+
+	colWidths := []float64{25, 75, 90}
+	headers := []string{"Method", "Path", "Summary"}
+
+	for i, header := range headers {
+		c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
+	}
+	c.pdf.Ln(-1)
+
+	// Table rows
+	c.pdf.SetFont("Arial", "", 9)
+	currentTocIndex := startTocIndex
+
+	for _, ep := range endpoints {
+		summary := stripHTML(ep.operation.Summary)
+		if len(summary) > 60 {
+			summary = summary[:57] + "..."
+		}
+
+		contents := []string{ep.method, ep.path, summary}
+		aligns := []string{"C", "L", "L"}
+		
+		var linkIDs []int
+		if currentTocIndex < len(c.tocItems) {
+			linkID := c.tocItems[currentTocIndex].linkID
+			linkIDs = []int{linkID, linkID, linkID}
+		}
+		
+		c.addTableRow(colWidths, contents, aligns, linkIDs)
+		currentTocIndex++
+	}
 }

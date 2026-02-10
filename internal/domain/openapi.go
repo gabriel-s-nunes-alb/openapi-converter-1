@@ -7,6 +7,7 @@ type OpenAPIDocument struct {
 	Version     string
 	Description string
 	Servers     []Server
+	Tags        []Tag
 	Paths       []Path
 	Components  map[string]Schema // Schema components (key is schema name)
 }
@@ -14,6 +15,12 @@ type OpenAPIDocument struct {
 // Server represents an API server.
 type Server struct {
 	URL         string
+	Description string
+}
+
+// Tag represents an OpenAPI tag.
+type Tag struct {
+	Name        string
 	Description string
 }
 

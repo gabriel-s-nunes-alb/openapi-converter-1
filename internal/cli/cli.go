@@ -135,6 +135,16 @@ func (c *CLI) convertSpec(spec *openapi3.T) *domain.OpenAPIDocument {
 		})
 	}
 
+	// Convert tags
+	for _, tag := range spec.Tags {
+		if tag != nil {
+			doc.Tags = append(doc.Tags, domain.Tag{
+				Name:        tag.Name,
+				Description: tag.Description,
+			})
+		}
+	}
+
 	// Convert paths
 	for pathStr, pathItem := range spec.Paths.Map() {
 		path := domain.Path{Path: pathStr}
