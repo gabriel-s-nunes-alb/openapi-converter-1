@@ -60,7 +60,9 @@ type RequestBody struct {
 
 // MediaType represents the content type and schema.
 type MediaType struct {
-	Schema Schema
+	Schema   Schema
+	Example  interface{}
+	Examples map[string]interface{}
 }
 
 // Response represents an API response.

@@ -1,6 +1,7 @@
 package converters
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -539,6 +540,12 @@ func (c *PDFConverter) addRequestBody(rb *domain.RequestBody) {
 		}
 		sort.Strings(contentTypes)
 
+		type bodyExample struct {
+			title   string
+			content interface{}
+		}
+		var examples []bodyExample
+
 		for _, contentType := range contentTypes {
 			media := rb.Content[contentType]
 			
@@ -575,6 +582,29 @@ func (c *PDFConverter) addRequestBody(rb *domain.RequestBody) {
 			linkIDs := []int{0, linkID}
 			
 			c.addTableRow(colWidths, contents, aligns, linkIDs)
+
+			if media.Example != nil {
+				examples = append(examples, bodyExample{title: contentType, content: media.Example})
+			}
+
+			if len(media.Examples) > 0 {
+				names := make([]string, 0, len(media.Examples))
+                for name := range media.Examples {
+                    names = append(names, name)
+                }
+                sort.Strings(names)
+                for _, name := range names {
+					examples = append(examples, bodyExample{title: fmt.Sprintf("%s (%s)", contentType, name), content: media.Examples[name]})
+				}
+			}
+		}
+
+		if len(examples) > 0 {
+			c.pdf.Ln(4)
+			c.addSubHeader("Request Examples")
+			for _, ex := range examples {
+				c.addExample(ex.title, ex.content)
+			}
 		}
 	}
 	c.pdf.Ln(2)
@@ -684,6 +714,49 @@ func (c *PDFConverter) addResponseTable(responses []domain.Response) {
 		
 		c.addTableRow(colWidths, contents, aligns, linkIDs)
 	}
+
+	// Gather examples from responses to display after table
+	type respExample struct {
+		title   string
+		content interface{}
+	}
+	var examples []respExample
+
+	for _, resp := range responses {
+		for mediaType, media := range resp.Content {
+            // First check if there is a single example
+			if media.Example != nil {
+				examples = append(examples, respExample{
+					title:   fmt.Sprintf("%s - %s", resp.StatusCode, mediaType),
+					content: media.Example,
+				})
+			}
+            // Also check for named examples
+            if len(media.Examples) > 0 {
+                // To keep order consistent
+                names := make([]string, 0, len(media.Examples))
+                for name := range media.Examples {
+                    names = append(names, name)
+                }
+                sort.Strings(names)
+                for _, name := range names {
+                    examples = append(examples, respExample{
+                        title:   fmt.Sprintf("%s - %s (%s)", resp.StatusCode, mediaType, name),
+                        content: media.Examples[name],
+                    })
+                }
+            }
+		}
+	}
+
+	if len(examples) > 0 {
+		c.pdf.Ln(4)
+		c.addSubHeader("Response Examples")
+		for _, ex := range examples {
+			c.addExample(ex.title, ex.content)
+		}
+	}
+
 	c.pdf.Ln(3)
 }
 
@@ -909,8 +982,8 @@ func (c *PDFConverter) addEndpointsSummary(endpoints []endpointRef, startTocInde
 	c.pdf.SetFont("Arial", "B", 9)
 	c.pdf.SetFillColor(245, 245, 245)
 
-	colWidths := []float64{25, 75, 90}
-	headers := []string{"Method", "Path", "Summary"}
+	colWidths := []float64{100, 75, 15}
+	headers := []string{"Summary", "Path", "Method"}
 
 	for i, header := range headers {
 		c.pdf.CellFormat(colWidths[i], 6, header, "1", 0, "", true, 0, "")
@@ -927,8 +1000,8 @@ func (c *PDFConverter) addEndpointsSummary(endpoints []endpointRef, startTocInde
 			summary = summary[:57] + "..."
 		}
 
-		contents := []string{ep.method, ep.path, summary}
-		aligns := []string{"C", "L", "L"}
+		contents := []string{summary, ep.path, ep.method}
+		aligns := []string{"L", "L", "C"}
 		
 		var linkIDs []int
 		if currentTocIndex < len(c.tocItems) {
@@ -939,4 +1012,32 @@ func (c *PDFConverter) addEndpointsSummary(endpoints []endpointRef, startTocInde
 		c.addTableRow(colWidths, contents, aligns, linkIDs)
 		currentTocIndex++
 	}
+}
+
+func (c *PDFConverter) addExample(title string, example interface{}) {
+	c.checkPageBreak(30) // Ensure enough space or break
+
+	c.pdf.SetFont("Arial", "I", 9)
+	c.pdf.SetTextColor(60, 60, 60)
+	c.pdf.CellFormat(pdfPageWidth, 6, "Example ("+title+"):", "", 1, "", false, 0, "")
+
+	c.pdf.SetFont("Courier", "", 8)
+	c.pdf.SetTextColor(0, 0, 0)
+	c.pdf.SetFillColor(250, 250, 250)
+
+	var content string
+	if b, err := json.MarshalIndent(example, "", "  "); err == nil {
+		content = string(b)
+	} else {
+		content = fmt.Sprintf("%v", example)
+	}
+
+	// Calculate height
+	lines := strings.Split(content, "\n")
+	height := float64(len(lines)) * 4.0 // 4.0 is likely not enough for MultiCell, usually line height.
+	// MultiCell line height is passed as argument, 4 here.
+	c.checkPageBreak(height + 2)
+
+	c.pdf.MultiCell(pdfPageWidth, 4, content, "1", "", true)
+	c.pdf.Ln(4)
 }

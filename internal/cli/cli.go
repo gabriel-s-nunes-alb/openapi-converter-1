@@ -243,9 +243,21 @@ func (c *CLI) convertContent(content openapi3.Content) map[string]domain.MediaTy
 	result := make(map[string]domain.MediaType)
 
 	for mediaType, item := range content {
-		result[mediaType] = domain.MediaType{
-			Schema: c.convertSchema(item.Schema),
+		mt := domain.MediaType{
+			Schema:  c.convertSchema(item.Schema),
+			Example: item.Example,
 		}
+
+		if len(item.Examples) > 0 {
+			mt.Examples = make(map[string]interface{})
+			for name, ex := range item.Examples {
+				if ex.Value != nil {
+					mt.Examples[name] = ex.Value.Value
+				}
+			}
+		}
+
+		result[mediaType] = mt
 	}
 
 	return result
