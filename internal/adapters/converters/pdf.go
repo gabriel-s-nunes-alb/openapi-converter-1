@@ -75,6 +75,10 @@ func (c *PDFConverter) collectTOC(doc *domain.OpenAPIDocument) {
 	// Add main sections to TOC
 	c.tocItems = append(c.tocItems, tocItem{title: "Overview", level: 1, linkID: c.pdf.AddLink()})
 
+	if len(doc.SecuritySchemes) > 0 {
+		c.tocItems = append(c.tocItems, tocItem{title: "Authentication", level: 1, linkID: c.pdf.AddLink()})
+	}
+
 	if len(doc.Servers) > 0 {
 		c.tocItems = append(c.tocItems, tocItem{title: "Servers", level: 1, linkID: c.pdf.AddLink()})
 	}
@@ -273,6 +277,58 @@ func (c *PDFConverter) addContent(doc *domain.OpenAPIDocument) {
 		c.pdf.SetFont("Arial", "", 10)
 		c.pdf.MultiCell(pdfPageWidth, 5, stripHTML(doc.Description), "", "", false)
 		c.pdf.Ln(4)
+	}
+
+	// Authentication section
+	if len(doc.SecuritySchemes) > 0 {
+		c.checkPageBreak(40)
+		c.setLinkDest(tocIndex)
+		tocIndex++
+
+		c.addSectionHeader("Authentication")
+
+		// Sort schemes by name for consistent output
+		schemeNames := make([]string, 0, len(doc.SecuritySchemes))
+		for name := range doc.SecuritySchemes {
+			schemeNames = append(schemeNames, name)
+		}
+		sort.Strings(schemeNames)
+
+		for _, name := range schemeNames {
+			scheme := doc.SecuritySchemes[name]
+			c.pdf.SetFont("Arial", "B", 10)
+			c.pdf.CellFormat(pdfPageWidth, 6, name, "", 1, "", false, 0, "")
+
+			c.pdf.SetFont("Arial", "", 10)
+			
+			// Type
+			c.pdf.CellFormat(30, 6, "Type:", "", 0, "", false, 0, "")
+			c.pdf.CellFormat(0, 6, scheme.Type, "", 1, "", false, 0, "")
+
+			// In (if apiKey)
+			if scheme.In != "" {
+				c.pdf.CellFormat(30, 6, "In:", "", 0, "", false, 0, "")
+				c.pdf.CellFormat(0, 6, scheme.In, "", 1, "", false, 0, "")
+			}
+
+			// Name (if apiKey)
+			if scheme.Name != "" && scheme.Name != name {
+				c.pdf.CellFormat(30, 6, "Name:", "", 0, "", false, 0, "")
+				c.pdf.CellFormat(0, 6, scheme.Name, "", 1, "", false, 0, "")
+			}
+
+            // Scheme (if http)
+			if scheme.Scheme != "" {
+				c.pdf.CellFormat(30, 6, "Scheme:", "", 0, "", false, 0, "")
+				c.pdf.CellFormat(0, 6, scheme.Scheme, "", 1, "", false, 0, "")
+			}
+			
+			if scheme.Description != "" {
+				c.pdf.Ln(2)
+				c.pdf.MultiCell(pdfPageWidth, 5, stripHTML(scheme.Description), "", "", false)
+			}
+			c.pdf.Ln(4)
+		}
 	}
 
 	// Servers

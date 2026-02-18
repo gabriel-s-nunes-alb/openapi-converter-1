@@ -10,6 +10,17 @@ type OpenAPIDocument struct {
 	Tags        []Tag
 	Paths       []Path
 	Components  map[string]Schema // Schema components (key is schema name)
+	SecuritySchemes map[string]SecurityScheme
+	Security        []map[string][]string
+}
+
+// SecurityScheme represents a security scheme.
+type SecurityScheme struct {
+	Type        string
+	Name        string
+	Description string
+	In          string
+	Scheme      string
 }
 
 // Server represents an API server.

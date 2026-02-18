@@ -124,7 +124,32 @@ func (c *CLI) convertSpec(spec *openapi3.T) *domain.OpenAPIDocument {
 		Title:       spec.Info.Title,
 		Version:     spec.Info.Version,
 		Description: spec.Info.Description,
-		Components:  make(map[string]domain.Schema),
+		Components:      make(map[string]domain.Schema),
+		SecuritySchemes: make(map[string]domain.SecurityScheme),
+	}
+
+	// Convert security schemes
+	if spec.Components != nil && spec.Components.SecuritySchemes != nil {
+		for name, ref := range spec.Components.SecuritySchemes {
+			if ref.Value != nil {
+				doc.SecuritySchemes[name] = domain.SecurityScheme{
+					Type:        ref.Value.Type,
+					Name:        ref.Value.Name,
+					Description: ref.Value.Description,
+					In:          ref.Value.In,
+					Scheme:      ref.Value.Scheme,
+				}
+			}
+		}
+	}
+
+	// Convert global security
+	for _, securityReq := range spec.Security {
+		sec := make(map[string][]string)
+		for name, scopes := range securityReq {
+			sec[name] = scopes
+		}
+		doc.Security = append(doc.Security, sec)
 	}
 
 	// Convert servers
